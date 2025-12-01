@@ -1,0 +1,93 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+@plugin "daisyui";
+
+:root {
+  font-family: 'Inter', system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+  color: #111827;
+  background-color: #f6f7fb;
+}
+
+body {
+  @apply bg-base-200 min-h-screen;
+}
+
+a {
+  color: inherit;
+}
+
+.app-shell {
+  @apply max-w-7xl mx-auto px-6 py-8 space-y-6;
+}
+
+.section-card {
+  @apply bg-base-100 shadow-sm rounded-xl border border-base-300 p-6 space-y-4;
+}
+
+.section-card summary {
+  @apply text-lg font-semibold cursor-pointer flex items-center gap-2;
+}
+
+.table-wrapper {
+  @apply overflow-x-auto;
+}
+
+.tag {
+  @apply badge badge-outline badge-sm gap-1;
+    height: unset;
+}
+
+.grid-panels {
+  @apply grid grid-cols-1 lg:grid-cols-2 gap-4;
+}
+
+.table td,
+.table th {
+  @apply align-top;
+}
+
+.chart-box {
+  @apply bg-base-100 rounded-xl border border-base-300 shadow-sm p-4;
+}
+
+.meta-card {
+  @apply card bg-base-100 border border-base-300 shadow-sm;
+}
+
+.meta-card .card-body {
+  @apply gap-2;
+}
+
+.header-bar {
+  @apply bg-gradient-to-r from-primary/10 via-base-100 to-secondary/5 border-b border-base-300;
+}
+
+.header-bar h1 {
+  @apply text-3xl font-bold text-neutral;
+}
+
+.badge-seed {
+  @apply badge badge-primary badge-outline;
+    height: unset;
+}
+
+.small-note {
+  @apply text-sm text-base-content/70;
+}
+
+.daisy-select label {
+  @apply text-sm font-medium text-base-content/70;
+}
+
+.daisy-select select {
+  @apply select select-bordered select-sm w-full;
+}
+
+.inline-tags {
+  @apply flex flex-wrap gap-2;
+}
+
+.hero-copy {
+  @apply text-base text-base-content/70 max-w-3xl;
+}
