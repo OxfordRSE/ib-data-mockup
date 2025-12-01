@@ -30,7 +30,8 @@ a {
 }
 
 .table-wrapper {
-  @apply overflow-x-auto;
+  max-height: 600px;
+  @apply overflow-x-auto overflow-y-auto;
 }
 
 .tag {
