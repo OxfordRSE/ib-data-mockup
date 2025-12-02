@@ -24,10 +24,9 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
-      - name: Build
-        env:
-          BUILD_DIR: dist          # Change to "dist" if you use Vite
+      - name: Build         # Change to "dist" if you use Vite
         run: |
+          BUILD_DIR="dist"  # adjust if your build output folder is different
           # ensure your package.json has a "build" script (e.g. react-scripts build / vite build)
           npm run build
           # sanity-check: print output folder contents for logs
@@ -38,7 +37,7 @@ jobs:
         id: upload
         uses: actions/upload-pages-artifact@v3
         with:
-          path: ${{ env.BUILD_DIR }}                # change to ${{ env.BUILD_DIR }} if you make env substitution
+          path: dist  # adjust if your build output folder is different
           # retention-days: 1       # optional: adjust artifact retention
 
   deploy:
