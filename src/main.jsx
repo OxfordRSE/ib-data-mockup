@@ -215,13 +215,17 @@ function SurveyChart({ responses, surveys, waves, schools, yearGroups, schoolToT
   const chartRef = useRef(null);
 
   const stats = useMemo(
-      () => responses.map((resp) => ({
-        ...resp,
-        mean: resp[`${surveyId}-mean`],
-        ci95: resp[`${surveyId}-ci95`],
-        n: resp[`${surveyId}-n`],
-        total: resp[`${surveyId}-n`] * resp[`${surveyId}-mean`],
-      })),
+      () => responses.map((resp) => {
+        const n = Number(resp[`${surveyId}-n`]) || 0;
+        const mean = Number(resp[`${surveyId}-mean`]) || 0;
+        const ci95 = Number(resp[`${surveyId}-ci95`]) || 0;
+        return {
+          ...resp,
+          mean,
+          ci95,
+          n,
+        };
+      }),
       [responses, surveyId],
   );
 
@@ -234,19 +238,7 @@ function SurveyChart({ responses, surveys, waves, schools, yearGroups, schoolToT
 
     if (view === 'cross-school') {
       for (const s of schools) {
-        const byWave = orderedWaves.map((wave) => {
-          // Weighted mean across all yeargroups
-          const entries = stats.filter((d) => d.schoolId === s.id && d.wave === wave);
-          const total_n = entries.reduce((acc, d) => acc + d.n, 0);
-          const total_score = entries.map((d) => d.total * d.n);
-          const mean = total_score.reduce((a, b) => a + b, 0) / (total_n || 1);
-          const variance = entries.reduce((acc, d) => {
-            const itemMean = d.total;
-            return acc + d.n * (d.ci95 / 1.96) ** 2 + d.n * (itemMean - mean) ** 2;
-          });
-          const ci = 1.96 * Math.sqrt(variance / (total_n || 1));
-          return { mean: Number(mean.toFixed(2)), ci: Number(ci.toFixed(2)) };
-        });
+        const byWave = orderedWaves.map((wave) => stats.find((d) => d.schoolId === s.id && d.wave === wave));
         traces.push({
           x: orderedWaves,
           y: byWave.map((d) => d.mean),
@@ -255,27 +247,52 @@ function SurveyChart({ responses, surveys, waves, schools, yearGroups, schoolToT
           mode: 'lines+markers',
         });
       }
-    } else {
-
-      const byWave = orderedWaves.map((wave) => {
-        // Weighted mean across all yeargroups
-        const entries = stats.filter((d) => d.schoolId === school && d.wave === wave);
-        const total_n = entries.reduce((acc, d) => acc + d.n, 0);
-        const total_score = entries.map((d) => d.total * d.n);
-        const mean = total_score.reduce((a, b) => a + b, 0) / (total_n || 1);
-        const variance = entries.reduce((acc, d) => {
-          const itemMean = d.total;
-          return acc + d.n * (d.ci95 / 1.96) ** 2 + d.n * (itemMean - mean) ** 2;
-        });
-        const ci = 1.96 * Math.sqrt(variance / (total_n || 1));
-        return { mean: Number(mean.toFixed(2)), ci: Number(ci.toFixed(2)) };
+      // Weighted average total line
+      const totalByWave = orderedWaves.map((wave) => {
+        const entries = stats.filter((d) => d.wave === wave && Number.isFinite(d.mean) && d.n > 0);
+        const totalN = entries.reduce((sum, e) => sum + e.n, 0);
+        if (totalN === 0) return { mean: null, ci: null };
+        const weightedMean = entries.reduce((sum, e) => sum + e.mean * (e.n / totalN), 0);
+        // Approximate CI95 for weighted mean
+        const weightedCi = entries.reduce((sum, e) => sum + e.ci95 * (e.n / totalN), 0);
+        return { mean: Number(weightedMean.toFixed(2)), ci: Number(weightedCi.toFixed(2)) };
       });
       traces.push({
         x: orderedWaves,
-        y: byWave.map((d) => d.mean),
-        error_y: { type: 'data', array: byWave.map((d) => d.ci), visible: true },
-        name: `${school.name} Total`,
+        y: totalByWave.map((d) => d.mean),
+        error_y: { type: 'data', array: totalByWave.map((d) => d.ci), visible: false },
+        name: `All Schools - Total`,
         mode: 'lines+markers',
+        line: { dash: 'dashdot', width: 4 },
+      });
+    } else {
+      for (const yg of yearGroups) {
+        const byWave = orderedWaves.map((wave) => stats.find((d) => d.schoolId === school && d.yearGroup === yg && d.wave === wave));
+        traces.push({
+          x: orderedWaves,
+          y: byWave.map((d) => d.mean),
+          error_y: { type: 'data', array: byWave.map((d) => d.ci), visible: true },
+          name: `${schools.find((s) => s.id === school)?.name || school} - ${yg}`,
+          mode: 'lines+markers',
+        });
+      }
+      // Weighted average total line
+      const totalByWave = orderedWaves.map((wave) => {
+        const entries = stats.filter((d) => d.schoolId === school && d.wave === wave && Number.isFinite(d.mean) && d.n > 0);
+        const totalN = entries.reduce((sum, e) => sum + e.n, 0);
+        if (totalN === 0) return { mean: null, ci: null };
+        const weightedMean = entries.reduce((sum, e) => sum + e.mean * (e.n / totalN), 0);
+        // Approximate CI95 for weighted mean
+        const weightedCi = entries.reduce((sum, e) => sum + e.ci95 * (e.n / totalN), 0);
+        return { mean: Number(weightedMean.toFixed(2)), ci: Number(weightedCi.toFixed(2)) };
+      });
+      traces.push({
+        x: orderedWaves,
+        y: totalByWave.map((d) => d.mean),
+        error_y: { type: 'data', array: totalByWave.map((d) => d.ci), visible: false },
+        name: `${schools.find((s) => s.id === school)?.name || school} - Total`,
+        mode: 'lines+markers',
+        line: { dash: 'dashdot', width: 4 },
       });
     }
 
@@ -303,7 +320,7 @@ function SurveyChart({ responses, surveys, waves, schools, yearGroups, schoolToT
     }
     const schoolName = schools.find((s) => s.id === school)?.name || 'Selected school';
     if (view === 'school') {
-      return `${surveyName} totals for ${schoolName} across all yeargroups`;
+      return `${surveyName} totals for ${schoolName}`;
     }
     throw new Error(`Unknown view type: ${view}`);
   }, [selectedSurvey, view, schools, school, yearGroup]);
@@ -325,7 +342,7 @@ function SurveyChart({ responses, surveys, waves, schools, yearGroups, schoolToT
           <label className="daisy-select space-y-1">
             <span>View</span>
             <select value={view} onChange={(e) => setView(e.target.value)}>
-              <option value="school">School (all years)</option>
+              <option value="school">School (by yeargroup)</option>
               <option value="cross-school">Across schools</option>
             </select>
           </label>
@@ -351,6 +368,137 @@ function SurveyChart({ responses, surveys, waves, schools, yearGroups, schoolToT
       </div>
   );
 }
+
+function ItemResponseChart({ responses, surveys, waves, schools, yearGroups, schoolToTtp }) {
+  const [surveyId, setSurveyId] = useState(surveys[0].id);
+  const [schoolId, setSchoolId] = useState(schools[0].id);
+  const [yearGroup, setYearGroup] = useState(yearGroups[0]);
+  const [studentUid, setStudentUid] = useState('all');
+  const chartRef = useRef(null);
+
+  const survey = useMemo(() => surveys.find((s) => s.id === surveyId), [surveyId, surveys]);
+
+  const itemKeys = useMemo(
+      () => Array.from({ length: survey?.items || 0 }, (_, idx) => `${surveyId}-item-${idx + 1}`),
+      [survey?.items, surveyId],
+  );
+
+  const studentOptions = useMemo(() => {
+    const pool = responses
+        .filter((r) => r.schoolId === schoolId && r.yearGroup === yearGroup)
+        .map((r) => r.uid);
+    const unique = Array.from(new Set(pool)).sort();
+    return [{ value: 'all', label: 'Yeargroup average' }, ...unique.map((uid) => ({ value: uid, label: uid }))];
+  }, [responses, schoolId, yearGroup]);
+
+  useEffect(() => {
+    if (!studentOptions.find((opt) => opt.value === studentUid)) {
+      setStudentUid('all');
+    }
+  }, [studentOptions, studentUid]);
+
+  useEffect(() => {
+    if (!chartRef.current || !survey) return;
+
+    const orderedWaves = [...waves];
+    const base = responses.filter((r) => r.schoolId === schoolId && r.yearGroup === yearGroup);
+
+    const traces = itemKeys.map((key, idx) => {
+      const y = orderedWaves.map((wave) => {
+        const entries = base.filter((r) => r.wave === wave);
+        if (studentUid !== 'all') {
+          const studentEntry = entries.find((r) => r.uid === studentUid);
+          const val = Number(studentEntry?.[key]);
+          return Number.isFinite(val) ? val : null;
+        }
+
+        const values = entries
+            .map((r) => Number(r[key]))
+            .filter((val) => Number.isFinite(val));
+        if (values.length === 0) return null;
+        const mean = values.reduce((a, b) => a + b, 0) / values.length;
+        return Number(mean.toFixed(2));
+      });
+
+      return {
+        x: orderedWaves,
+        y,
+        mode: 'lines+markers',
+        name: `${survey.name} Item ${idx + 1}`,
+      };
+    });
+
+    Plotly.react(
+        chartRef.current,
+        traces,
+        {
+          title: `${survey.name} item scores (${studentUid === 'all' ? 'yeargroup mean' : studentUid})`,
+          yaxis: { title: 'Item score', range: [0, 3], dtick: 1, zeroline: false },
+          xaxis: { title: 'Wave' },
+          legend: { orientation: 'h' },
+          margin: { t: 50, r: 10, l: 60, b: 40 },
+        },
+        { responsive: true },
+    );
+  }, [responses, survey, waves, schoolId, yearGroup, studentUid, itemKeys]);
+
+  return (
+      <div className="section-card">
+        <h2 className="text-xl font-semibold">Item-level explorer (relabelled responses)</h2>
+        <div className="grid grid-cols-1 md:grid-cols-4 gap-3">
+          <label className="daisy-select space-y-1">
+            <span>Survey</span>
+            <select value={surveyId} onChange={(e) => setSurveyId(e.target.value)}>
+              {surveys.map((s) => (
+                  <option key={s.id} value={s.id}>
+                    {s.name}
+                  </option>
+              ))}
+            </select>
+          </label>
+          <label className="daisy-select space-y-1">
+            <span>School</span>
+            <select value={schoolId} onChange={(e) => setSchoolId(e.target.value)}>
+              {schools.map((s) => (
+                  <option key={s.id} value={s.id}>
+                    {s.name}
+                    {schoolToTtp?.[s.id] ? ` (${schoolToTtp[s.id]})` : ''}
+                  </option>
+              ))}
+            </select>
+          </label>
+          <label className="daisy-select space-y-1">
+            <span>Yeargroup</span>
+            <select value={yearGroup} onChange={(e) => setYearGroup(e.target.value)}>
+              {yearGroups.map((yg) => (
+                  <option key={yg} value={yg}>
+                    {yg}
+                  </option>
+              ))}
+            </select>
+          </label>
+          <label className="daisy-select space-y-1">
+            <span>Student</span>
+            <select value={studentUid} onChange={(e) => setStudentUid(e.target.value)}>
+              {studentOptions.map((opt) => (
+                  <option key={opt.value} value={opt.value}>
+                    {opt.label}
+                  </option>
+              ))}
+            </select>
+          </label>
+        </div>
+        <p className="small-note mt-2">
+          View relabelled item scores by yeargroup or drill down to an individual student within that cohort.
+        </p>
+        <div className="chart-box mt-4">
+          <div ref={chartRef} className="h-[420px]" />
+        </div>
+        <p className="small-note">Each line shows a survey item. Switch to a student to see their trajectory across waves.</p>
+      </div>
+  );
+}
+
 
 function App() {
   const dataset = useMemo(() => buildDataset(20241201), []);
@@ -416,7 +564,6 @@ function App() {
     });
     return columns;
   }, [dataset.surveys]);
-  console.log({ surveyItemColumns });
 
 
   const surveyColumns = [
@@ -571,6 +718,15 @@ function App() {
 
           <SurveyChart
               responses={dataset.dynamicAggregated}
+              surveys={dataset.surveys}
+              waves={dataset.waves}
+              schools={dataset.schools}
+              yearGroups={dataset.yearGroups}
+              schoolToTtp={schoolToTtp}
+          />
+
+          <ItemResponseChart
+              responses={dataset.relabelledSurveyResponses}
               surveys={dataset.surveys}
               waves={dataset.waves}
               schools={dataset.schools}

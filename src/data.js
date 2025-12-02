@@ -228,7 +228,7 @@ function buildSurveyResponses(students, random) {
               const normalScore = Math.floor(random() * 4);
               const score = elevatedThisWave ? Math.min(3, 2 + Math.floor(random() * 2)) : normalScore;
               total += score;
-              return [`${survey.id}-item-${idx}`, score];
+              return [`${survey.id}-item-${idx + 1}`, score];
             })
         );
         response = {
