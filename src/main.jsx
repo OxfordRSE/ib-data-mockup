@@ -91,6 +91,23 @@ function decodeDataFromParam(value) {
   return JSON.parse(atob(value));
 }
 
+function computeMean(values) {
+  if (values.length === 0) return 0;
+  return values.reduce((a, b) => a + b, 0) / values.length;
+}
+
+function computeStddev(values) {
+  if (values.length <= 1) return 0;
+  const mean = computeMean(values);
+  const variance = values.reduce((acc, val) => acc + (val - mean) ** 2, 0) / (values.length - 1);
+  return Math.sqrt(variance);
+}
+
+function computeCi95(values) {
+  if (values.length === 0) return 0;
+  return 1.96 * (computeStddev(values) / Math.sqrt(values.length));
+}
+
 function FilterRow({ schools, yearGroups, waves, ethnicities, filters, onChange, schoolToTtp }) {
   return (
       <div className="grid grid-cols-1 sm:grid-cols-4 gap-4">
@@ -166,18 +183,21 @@ function DataTable({ columns, rows }) {
           </tr>
           </thead>
           <tbody>
-          {rows.map((row, idx) => (
-              <tr key={idx} className={clsx({
-                "hover:bg-base-200/70": !(row['phq9-n'] > 0 && row['phq9-n'] < 5),
-                "bg-error/70": row['phq9-n'] > 0 && row['phq9-n'] < 5
-              })}>
-                {columns.map((col) => (
-                    <td key={col.key} className="text-sm">
-                      {col.render ? col.render(row[col.key], row) : row[col.key]}
-                    </td>
-                ))}
-              </tr>
-          ))}
+          {rows.map((row, idx) => {
+            const suppressed = Boolean(row?.suppressed);
+            return (
+                <tr key={idx} className={clsx({
+                  "hover:bg-base-200/70": !suppressed,
+                  "!bg-error/70": suppressed,
+                })}>
+                  {columns.map((col) => (
+                      <td key={col.key} className="text-sm">
+                        {col.render ? col.render(row[col.key], row) : row[col.key]}
+                      </td>
+                  ))}
+                </tr>
+            );
+          })}
           </tbody>
         </table>
       </div>
@@ -273,6 +293,58 @@ function DatasetSection({
         </details>
       </div>
   );
+}
+
+function buildGroupKey(response, groupingFields, schoolToTtp) {
+  const extended = { ...response, ttpId: schoolToTtp?.[response.schoolId] || 'All TTPs' };
+  return groupingFields.map((field) => extended[field] || 'All').join('|');
+}
+
+function aggregateResponses(responses, surveys, groupingFields, suppressionThreshold, schoolToTtp) {
+  const grouped = new Map();
+  const resolvedFields = Array.from(new Set([...groupingFields, 'wave']));
+
+  responses.forEach((resp) => {
+    const key = buildGroupKey(resp, resolvedFields, schoolToTtp);
+    if (!grouped.has(key)) grouped.set(key, []);
+    grouped.get(key).push(resp);
+  });
+
+  const aggregates = [];
+  for (const [key, group] of grouped.entries()) {
+    const sample = group[0] || {};
+    const summary = {};
+
+    surveys.forEach((survey) => {
+      const totals = group.map((entry) => Number(entry[`${survey.id}-total`]) || 0);
+      const totalScore = totals.reduce((a, b) => a + b, 0);
+      summary[`${survey.id}-total`] = Number(totalScore.toFixed(2));
+      summary[`${survey.id}-n`] = totals.length;
+      summary[`${survey.id}-mean`] = Number((totals.length ? totalScore / totals.length : 0).toFixed(2));
+      summary[`${survey.id}-ci95`] = Number(computeCi95(totals).toFixed(2));
+    });
+
+    const resolveValue = (field, fallback) => {
+      if (!resolvedFields.includes(field)) return fallback;
+      if (field === 'ttpId') return schoolToTtp?.[sample.schoolId] || fallback;
+      return sample[field] ?? fallback;
+    };
+
+    const suppressed = summary['phq9-n'] < suppressionThreshold;
+    aggregates.push({
+      groupKey: key,
+      ttpId: resolveValue('ttpId', 'All TTPs'),
+      schoolId: resolveValue('schoolId', 'All schools'),
+      yearGroup: resolveValue('yearGroup', 'All yeargroups'),
+      ethnicity: resolveValue('ethnicity', 'All ethnicities'),
+      wave: resolveValue('wave', 'All waves'),
+      ...summary,
+      suppressed,
+      notes: suppressed ? `Suppressed: fewer than ${suppressionThreshold} records` : 'Ready for responsive queries',
+    });
+  }
+
+  return aggregates;
 }
 
 function TtpPanel({ ttps, schools }) {
@@ -464,6 +536,417 @@ function LabelSetManager({
             </div>
           </div>
         </div>
+      </div>
+  );
+}
+
+function DynamicAggregatedSection({
+  dataset,
+  labelOptions,
+  assignedLabels,
+  onAddLabel,
+  onRemoveLabel,
+  schoolToTtp,
+  schoolLookup,
+}) {
+  const { surveys, relabelledSurveyResponses, schools, yearGroups, waves } = dataset;
+  const ethnicityOptions = useMemo(
+      () => Array.from(new Set(relabelledSurveyResponses.map((r) => r.ethnicity))).sort(),
+      [relabelledSurveyResponses],
+  );
+
+  const groupingOptions = [
+    { value: 'school-year-ethnicity', label: 'School + Yeargroup + Ethnicity', fields: ['schoolId', 'yearGroup', 'ethnicity'] },
+    { value: 'school-year', label: 'School + Yeargroup', fields: ['schoolId', 'yearGroup'] },
+    { value: 'school', label: 'School', fields: ['schoolId'] },
+    { value: 'year', label: 'Yeargroup', fields: ['yearGroup'] },
+    { value: 'ethnicity', label: 'Ethnicity', fields: ['ethnicity'] },
+    { value: 'ttp', label: 'Trusted third party', fields: ['ttpId'] },
+    { value: 'all', label: 'All data together', fields: [] },
+  ];
+
+  const [filters, setFilters] = useState({
+    school: 'all',
+    yearGroup: 'all',
+    wave: 'all',
+    ethnicity: 'all',
+    thresholdSurveyId: surveys[0].id,
+    comparator: '>',
+    surveyValue: '0',
+  });
+  const [displaySurveyId, setDisplaySurveyId] = useState(surveys[0].id);
+  const [grouping, setGrouping] = useState(groupingOptions[0].value);
+  const [suppressionThreshold, setSuppressionThreshold] = useState(5);
+  const chartRef = useRef(null);
+
+  useEffect(() => {
+    if (!surveys.find((s) => s.id === filters.thresholdSurveyId)) {
+      setFilters((prev) => ({ ...prev, thresholdSurveyId: surveys[0].id }));
+    }
+  }, [filters.thresholdSurveyId, surveys]);
+
+  useEffect(() => {
+    if (!surveys.find((s) => s.id === displaySurveyId)) {
+      setDisplaySurveyId(surveys[0].id);
+    }
+  }, [displaySurveyId, surveys]);
+
+  const groupingFields = useMemo(
+      () => {
+        const found = groupingOptions.find((opt) => opt.value === grouping);
+        const base = found ? found.fields : groupingOptions[0].fields;
+        return Array.from(new Set(['wave', ...base]));
+      },
+      [grouping],
+  );
+
+  const groupingWithoutWave = useMemo(
+      () => groupingFields.filter((field) => field !== 'wave'),
+      [groupingFields],
+  );
+
+  const filteredResponses = useMemo(
+      () => relabelledSurveyResponses.filter((resp) => {
+        const schoolMatch = filters.school === 'all' || resp.schoolId === filters.school;
+        const yearMatch = filters.yearGroup === 'all' || resp.yearGroup === filters.yearGroup;
+        const waveMatch = filters.wave === 'all' || resp.wave === filters.wave;
+        const ethnicityMatch = filters.ethnicity === 'all' || resp.ethnicity === filters.ethnicity;
+        return schoolMatch && yearMatch && waveMatch && ethnicityMatch;
+      }),
+      [filters, relabelledSurveyResponses],
+  );
+
+  const aggregated = useMemo(
+      () => aggregateResponses(filteredResponses, surveys, groupingFields, suppressionThreshold, schoolToTtp),
+      [filteredResponses, groupingFields, suppressionThreshold, schoolToTtp, surveys],
+  );
+
+  const valueFiltered = useMemo(() => {
+    const threshold = Number(filters.surveyValue);
+    const hasThreshold = filters.surveyValue !== '' && Number.isFinite(threshold);
+    return aggregated.filter((row) => {
+      const target = Number(row[`${filters.thresholdSurveyId}-mean`]);
+      if (!hasThreshold) return true;
+      if (filters.comparator === '<') return target < threshold;
+      return target > threshold;
+    });
+  }, [aggregated, filters.comparator, filters.thresholdSurveyId, filters.surveyValue]);
+
+  const unsuppressedKeys = useMemo(
+      () => new Set(valueFiltered.filter((row) => !row.suppressed).map((row) => row.groupKey)),
+      [valueFiltered],
+  );
+
+  const graphResponses = useMemo(
+      () => filteredResponses.filter((resp) => unsuppressedKeys.has(buildGroupKey(resp, groupingFields, schoolToTtp))),
+      [filteredResponses, groupingFields, schoolToTtp, unsuppressedKeys],
+  );
+
+  const sortedAggregates = useMemo(() => {
+    const waveOrder = Object.fromEntries(waves.map((w, idx) => [w, idx]));
+    return [...valueFiltered].sort((a, b) => (waveOrder[a.wave] ?? 0) - (waveOrder[b.wave] ?? 0));
+  }, [valueFiltered, waves]);
+
+  const dynamicColumns = useMemo(() => {
+    const survey = surveys.find((s) => s.id === displaySurveyId) || surveys[0];
+    const surveyLabel = survey?.name || displaySurveyId;
+    const baseColumns = [
+      { key: 'ttpId', label: 'TTP' },
+      { key: 'schoolId', label: 'School', render: (v) => schoolLookup[v] || v || '—' },
+      { key: 'yearGroup', label: 'Yeargroup' },
+      { key: 'ethnicity', label: 'Ethnicity' },
+      { key: 'wave', label: 'Wave' },
+    ];
+    const surveyColumns = survey
+        ? [
+          { key: `${survey.id}-n`, label: `${surveyLabel} N` },
+          { key: `${survey.id}-mean`, label: `${surveyLabel} Mean Total` },
+          { key: `${survey.id}-ci95`, label: `${surveyLabel} 95% CI` },
+        ]
+        : [];
+    return [...baseColumns, ...surveyColumns, { key: 'notes', label: 'Notes' }];
+  }, [displaySurveyId, schoolLookup, surveys]);
+
+  useEffect(() => {
+    if (!chartRef.current) return;
+
+    const hasData = graphResponses.length > 0;
+    const multipleWaves = filters.wave === 'all';
+    const waveList = multipleWaves ? waves.filter((w) => graphResponses.some((resp) => resp.wave === w)) : [filters.wave];
+
+    if (!hasData || waveList.length === 0) {
+      Plotly.react(chartRef.current, [], {
+        title: 'No unsuppressed data to chart',
+        xaxis: { visible: false },
+        yaxis: { visible: false },
+        annotations: [{ text: 'Adjust filters or suppression threshold to view trends', showarrow: false }],
+      }, { responsive: true });
+      return;
+    }
+
+    const availableWaves = multipleWaves ? waveList : [filters.wave];
+    const describeGroupingField = (field) => {
+      switch (field) {
+        case 'schoolId':
+          return 'school';
+        case 'yearGroup':
+          return 'yeargroup';
+        case 'ethnicity':
+          return 'ethnicity';
+        case 'ttpId':
+          return 'trusted third party';
+        default:
+          return field;
+      }
+    };
+    const formatGroupLabel = (entry) => {
+      if (groupingWithoutWave.length === 0) return 'All data';
+      const extended = { ...entry, ttpId: schoolToTtp?.[entry.schoolId] || entry.ttpId || 'All TTPs' };
+      const parts = groupingWithoutWave.map((field) => {
+        if (field === 'schoolId') return schoolLookup[extended.schoolId] || extended.schoolId || 'All schools';
+        if (field === 'yearGroup') return extended.yearGroup || 'All yeargroups';
+        if (field === 'ethnicity') return extended.ethnicity || 'All ethnicities';
+        if (field === 'ttpId') return extended.ttpId || 'All TTPs';
+        return extended[field] || 'All';
+      });
+      return parts.join(' | ');
+    };
+    const groupingKeyFromEntry = (entry) => {
+      if (groupingWithoutWave.length === 0) return 'all';
+      const extended = { ...entry, ttpId: schoolToTtp?.[entry.schoolId] || entry.ttpId || 'All TTPs' };
+      return groupingWithoutWave.map((field) => extended[field] || 'All').join('|');
+    };
+    const groupKeyLabels = new Map();
+    graphResponses.forEach((resp) => {
+      const baseKey = groupingKeyFromEntry(resp);
+      if (!groupKeyLabels.has(baseKey)) {
+        groupKeyLabels.set(baseKey, formatGroupLabel(resp));
+      }
+    });
+    const singleGroup = groupKeyLabels.size <= 1;
+    const traces = [];
+
+    if (!multipleWaves) {
+      const itemLabels = [];
+      const itemMeans = [];
+      const wave = availableWaves[0];
+      const activeSurveys = surveys.filter((survey) => survey.id === displaySurveyId) ?? surveys;
+      (activeSurveys.length ? activeSurveys : surveys).forEach((survey) => {
+        for (let i = 1; i <= survey.items; i += 1) {
+          const itemKey = `${survey.id}-item-${i}`;
+          const values = graphResponses
+              .filter((resp) => resp.wave === wave)
+              .map((resp) => Number(resp[itemKey]))
+              .filter((val) => Number.isFinite(val));
+          itemLabels.push(`${survey.name} Item ${i}`);
+          itemMeans.push(values.length ? Number(computeMean(values).toFixed(2)) : null);
+        }
+      });
+
+      traces.push({
+        type: 'bar',
+        x: itemLabels,
+        y: itemMeans,
+        marker: { color: '#2563eb' },
+        name: 'Grand mean',
+      });
+
+      Plotly.react(chartRef.current, traces, {
+        title: `Item means for ${wave}`,
+        yaxis: { title: 'Mean score', range: [0, 3.5], zeroline: false },
+        xaxis: { title: 'Survey item', automargin: true },
+        margin: { t: 50, r: 10, l: 50, b: 120 },
+      }, { responsive: true });
+      return;
+    }
+
+    const wavesForChart = availableWaves;
+    const activeSurveys = surveys.filter((survey) => survey.id === displaySurveyId);
+    const surveysForChart = activeSurveys.length ? activeSurveys : surveys;
+
+    if (singleGroup) {
+      surveysForChart.forEach((survey) => {
+        for (let i = 1; i <= survey.items; i += 1) {
+          const itemKey = `${survey.id}-item-${i}`;
+          const y = wavesForChart.map((wave) => {
+            const values = graphResponses
+                .filter((resp) => resp.wave === wave)
+                .map((resp) => Number(resp[itemKey]))
+                .filter((val) => Number.isFinite(val));
+            if (values.length === 0) return null;
+            return Number(computeMean(values).toFixed(2));
+          });
+          traces.push({
+            x: wavesForChart,
+            y,
+            mode: 'lines+markers',
+            name: `${survey.name} Item ${i}`,
+          });
+        }
+      });
+    } else {
+      surveysForChart.forEach((survey) => {
+        groupKeyLabels.forEach((label, baseKey) => {
+          const y = wavesForChart.map((wave) => {
+            const totals = graphResponses
+                .filter((resp) => resp.wave === wave)
+                .filter((resp) => groupingKeyFromEntry(resp) === baseKey)
+                .map((resp) => Number(resp[`${survey.id}-total`]))
+                .filter((val) => Number.isFinite(val));
+            if (totals.length === 0) return null;
+            return Number(computeMean(totals).toFixed(2));
+          });
+          traces.push({
+            x: wavesForChart,
+            y,
+            mode: 'lines+markers',
+            name: `${label} (${survey.name})`,
+          });
+        });
+
+        const grandMean = wavesForChart.map((wave) => {
+          const totals = graphResponses
+              .filter((resp) => resp.wave === wave)
+              .map((resp) => Number(resp[`${survey.id}-total`]))
+              .filter((val) => Number.isFinite(val));
+          if (totals.length === 0) return null;
+          return Number(computeMean(totals).toFixed(2));
+        });
+
+        traces.push({
+          x: wavesForChart,
+          y: grandMean,
+          mode: 'lines+markers',
+          name: `${survey.name} grand mean`,
+          line: { dash: 'dash', width: 3, color: '#111827' },
+          marker: { color: '#111827' },
+        });
+      });
+    }
+
+    Plotly.react(chartRef.current, traces, {
+      title: groupingWithoutWave.length
+          ? `Means by ${groupingWithoutWave.map(describeGroupingField).join(' / ')} across waves`
+          : 'Means across waves',
+      yaxis: { title: 'Mean total', zeroline: false },
+      xaxis: { title: 'Wave' },
+      legend: { orientation: 'h' },
+      margin: { t: 50, r: 10, l: 60, b: 40 },
+    }, { responsive: true });
+  }, [displaySurveyId, filters.wave, graphResponses, groupingWithoutWave, schoolLookup, schoolToTtp, surveys, valueFiltered, waves]);
+
+  return (
+      <div className="section-card">
+        <details open className="space-y-3">
+          <summary className="flex items-center gap-2">
+            <span className="text-primary">◆</span>
+            <span className="flex items-center gap-2">Dynamic aggregated data</span>
+          </summary>
+          <div className="space-y-3">
+            <p className="small-note">Adjust the grouping level, suppression threshold, and numeric filters to explore responsive aggregates. Choose the display survey for table/chart columns; the threshold survey only affects the comparator filter. Suppressed rows remain visible in the table with a red background but are excluded from the chart.</p>
+
+            <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
+              <div className="space-y-2">
+                <h3 className="font-semibold text-base">Filters</h3>
+                <FilterRow
+                    schools={schools}
+                    yearGroups={yearGroups}
+                    waves={waves}
+                    filters={filters}
+                    onChange={setFilters}
+                    schoolToTtp={schoolToTtp}
+                    ethnicities={ethnicityOptions}
+                />
+                <div className="grid grid-cols-1 md:grid-cols-4 gap-3 mt-2">
+                  <label className="daisy-select space-y-1">
+                    <span>Display survey</span>
+                    <select value={displaySurveyId} onChange={(e) => setDisplaySurveyId(e.target.value)}>
+                      {surveys.map((survey) => (
+                          <option key={survey.id} value={survey.id}>
+                            {survey.name}
+                          </option>
+                      ))}
+                    </select>
+                  </label>
+                  <label className="daisy-select space-y-1">
+                    <span>Threshold target survey</span>
+                    <select value={filters.thresholdSurveyId} onChange={(e) => setFilters((prev) => ({ ...prev, thresholdSurveyId: e.target.value }))}>
+                      {surveys.map((survey) => (
+                          <option key={survey.id} value={survey.id}>
+                            {survey.name}
+                          </option>
+                      ))}
+                    </select>
+                  </label>
+                  <label className="daisy-select space-y-1">
+                    <span>Comparator</span>
+                    <select value={filters.comparator} onChange={(e) => setFilters((prev) => ({ ...prev, comparator: e.target.value }))}>
+                      <option value=">">&gt;</option>
+                      <option value="<">&lt;</option>
+                    </select>
+                  </label>
+                  <label className="space-y-1">
+                    <span className="text-sm font-medium text-base-content/70">Survey total threshold</span>
+                    <input
+                        type="number"
+                        className="input input-bordered input-sm w-full"
+                        value={filters.surveyValue}
+                        onChange={(e) => setFilters((prev) => ({ ...prev, surveyValue: e.target.value }))}
+                        placeholder="10"
+                    />
+                  </label>
+                </div>
+                <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+                  <label className="daisy-select space-y-1">
+                    <span>Grouping level</span>
+                    <select value={grouping} onChange={(e) => setGrouping(e.target.value)}>
+                      {groupingOptions.map((opt) => (
+                          <option key={opt.value} value={opt.value}>
+                            {opt.label}
+                          </option>
+                      ))}
+                    </select>
+                  </label>
+                  <label className="space-y-1">
+                    <span className="text-sm font-medium text-base-content/70">Suppression threshold</span>
+                    <input
+                        type="number"
+                        min={1}
+                        className="input input-bordered input-sm w-full"
+                        value={suppressionThreshold}
+                        onChange={(e) => setSuppressionThreshold(Number(e.target.value) || 0)}
+                    />
+                  </label>
+                </div>
+              </div>
+
+              <div className="space-y-2">
+                <h3 className="font-semibold text-base">Labels</h3>
+                <p className="small-note">Apply labels to this dataset to reflect sensitivity decisions.</p>
+                <div className="label-area">
+                  <div className="flex items-center gap-2 flex-wrap">
+                    {assignedLabels.length > 0 ? (
+                        assignedLabels.map((label) => (
+                            <LabelBadge key={label.id} label={label} onRemove={onRemoveLabel} />
+                        ))
+                    ) : (
+                        <span className="small-note">No labels yet.</span>
+                    )}
+                  </div>
+                  {labelOptions.length > 0 && (
+                      <LabelPicker allLabels={labelOptions} selectedIds={assignedLabels.map((l) => l.id)} onAdd={onAddLabel} />
+                  )}
+                </div>
+              </div>
+            </div>
+
+            <DataTable columns={dynamicColumns} rows={sortedAggregates} />
+
+            <div className="chart-box mt-4">
+              <div ref={chartRef} className="h-[420px]" />
+            </div>
+          </div>
+        </details>
       </div>
   );
 }
@@ -812,8 +1295,7 @@ function ItemResponseChart({ responses, surveys, waves, schools, yearGroups, sch
 function App() {
   const dataset = useMemo(() => buildDataset(20241201), []);
   console.log(dataset);
-  const [filters, setFilters] = useState({ school: 'all', yearGroup: 'all', wave: 'all', ethnicity: 'all' });
-const initialSets = useMemo(() => loadLabelSets() || [DEFAULT_LABEL_SET], []);
+  const initialSets = useMemo(() => loadLabelSets() || [DEFAULT_LABEL_SET], []);
   const [labelSets, setLabelSets] = useState(initialSets);
   const [activeSetName, setActiveSetName] = useState(initialSets[0]?.name || DEFAULT_LABEL_SET.name);
 
@@ -902,16 +1384,7 @@ const initialSets = useMemo(() => loadLabelSets() || [DEFAULT_LABEL_SET], []);
     }
   }, []);
 
-  const filterRows = (rows, map) =>
-      rows
-          .filter((row) => {
-            const schoolMatch = filters.school === 'all' || row.schoolId === filters.school;
-            const yearMatch = filters.yearGroup === 'all' || row.yearGroup === filters.yearGroup;
-            const waveMatch = filters.wave === 'all' || row.wave === filters.wave;
-            const ethnicityMatch = filters.ethnicity === 'all' || row.ethnicity === filters.ethnicity;
-            return schoolMatch && yearMatch && waveMatch && ethnicityMatch;
-          })
-          .map(map || ((r) => r));
+  const filterRows = (rows, map) => rows.map(map || ((r) => r));
 
   const ethnicityOptions = useMemo(
       () => Array.from(new Set(dataset.students.map((s) => s.ethnicity))).sort(),
@@ -1131,19 +1604,6 @@ const initialSets = useMemo(() => loadLabelSets() || [DEFAULT_LABEL_SET], []);
         </header>
 
         <main className="app-shell">
-          <div className="section-card">
-            <h2 className="text-xl font-semibold">Filters</h2>
-            <FilterRow
-                schools={dataset.schools}
-                yearGroups={dataset.yearGroups}
-                waves={dataset.waves}
-                filters={filters}
-                onChange={setFilters}
-                schoolToTtp={schoolToTtp}
-                ethnicities={ethnicityOptions}
-            />
-            <p className="small-note">Filters apply to the tables below to make walkthroughs easier.</p>
-          </div>
 
           <LabelSetManager
               labelSets={labelSets}
@@ -1225,24 +1685,13 @@ const initialSets = useMemo(() => loadLabelSets() || [DEFAULT_LABEL_SET], []);
               onRemoveLabel={(labelId) => removeLabelFromSection('staticAggregated', labelId)}
           />
 
-          <DatasetSection
-              title="Dynamic aggregated data"
-              description="Aggregates intended for responsive queries with suppression logic, including ethnicity-aware and ethnicity-agnostic cuts."
-              columns={aggregateColumns}
-              rows={filterRows([...dataset.dynamicAggregated, ...dataset.dynamicAggregatedAgnostic])}
+          <DynamicAggregatedSection
+              dataset={dataset}
               labelOptions={labelOptions}
               assignedLabels={resolvedLabels('dynamicAggregated')}
               onAddLabel={(labelId) => addLabelToSection('dynamicAggregated', labelId)}
               onRemoveLabel={(labelId) => removeLabelFromSection('dynamicAggregated', labelId)}
-          />
-
-          <SurveyChart
-              responses={dataset.dynamicAggregated}
-              surveys={dataset.surveys}
-              waves={dataset.waves}
-              schools={dataset.schools}
-              yearGroups={dataset.yearGroups}
-              schoolToTtp={schoolToTtp}
+              schoolLookup={schoolLookup}
           />
 
           <ItemResponseChart
