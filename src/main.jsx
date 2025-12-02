@@ -1,9 +1,95 @@
-import React, { useEffect, useMemo, useRef, useState } from 'react';
+import React, {useEffect, useMemo, useRef, useState} from 'react';
 import ReactDOM from 'react-dom/client';
 import Plotly from 'plotly.js-dist-min';
-import { buildDataset } from './data.js';
+import {buildDataset} from './data.js';
 import './index.css';
-import clsx from "clsx";
+
+function clsx(...args) {
+  return args
+      .flatMap((arg) => {
+        if (!arg) return [];
+        if (typeof arg === 'string') return [arg];
+        if (Array.isArray(arg)) return arg;
+        if (typeof arg === 'object') {
+          return Object.entries(arg)
+              .filter(([, value]) => Boolean(value))
+              .map(([key]) => key);
+        }
+        return [];
+      })
+      .join(' ');
+}
+
+const STORAGE_KEY = 'ib-label-sets';
+const DESCRIPTION_LIMIT = 140;
+
+const DEFAULT_LABELS = [
+  {
+    id: 'pii',
+    name: 'PII',
+    color: '#b91c1c',
+    description: 'Direct identifiers such as names or login credentials.',
+  },
+  {
+    id: 'pseudo',
+    name: 'Pseudo',
+    color: '#ef4444',
+    description: 'Identifiers rewritten but still reversible via a lookup map.',
+  },
+  {
+    id: 'anon-risk',
+    name: 'Anon (risk)',
+    color: '#fca5a5',
+    description: 'Aggregated or masked data that could be re-identified.',
+  },
+  {
+    id: 'anon',
+    name: 'Anon',
+    color: '#22c55e',
+    description: 'Anonymous data with no realistic re-identification path.',
+  },
+];
+
+const DEFAULT_LABEL_SET = {
+  name: 'Sensitivity defaults',
+  labels: DEFAULT_LABELS,
+  assignments: {
+    credentials: ['pii'],
+    studentCredentials: ['pii'],
+    rewriteMap: ['pseudo'],
+    surveyResponses: ['pseudo'],
+    relabelledSurveyResponses: ['anon-risk'],
+    staticAggregated: ['anon'],
+    dynamicAggregated: ['anon-risk'],
+  },
+};
+
+function loadLabelSets() {
+  if (typeof localStorage === 'undefined') return null;
+  try {
+    const raw = localStorage.getItem(STORAGE_KEY);
+    if (!raw) return null;
+    const parsed = JSON.parse(raw);
+    if (!Array.isArray(parsed)) return null;
+    return parsed;
+  } catch (e) {
+    console.warn('Failed to read label sets from storage', e);
+    return null;
+  }
+}
+
+function saveLabelSets(sets) {
+  if (typeof localStorage === 'undefined') return;
+  localStorage.setItem(STORAGE_KEY, JSON.stringify(sets));
+}
+
+function encodeDataForParam(data) {
+  return btoa(JSON.stringify(data));
+}
+
+function decodeDataFromParam(value) {
+  return JSON.parse(atob(value));
+}
 
 function FilterRow({ schools, yearGroups, waves, ethnicities, filters, onChange, schoolToTtp }) {
   return (
@@ -98,93 +184,93 @@ function DataTable({ columns, rows }) {
   );
 }
 
-function DatasetSection({ title, description, columns, rows, children, badges = [] }) {
+function LabelBadge({ label, onRemove }) {
+  return (
+      <span
+          className="label-chip"
+          style={{ backgroundColor: label.color }}
+          title={label.description}
+      >
+        <span className="font-semibold text-sm">{label.name}</span>
+        {onRemove && (
+            <button className="remove-btn" type="button" onClick={() => onRemove(label.id)} aria-label={`Remove ${label.name}`}>
+              ×
+            </button>
+        )}
+      </span>
+  );
+}
+
+function LabelPicker({ allLabels, selectedIds, onAdd }) {
+  const available = allLabels.filter((label) => !selectedIds.includes(label.id));
+  const [pending, setPending] = useState(available[0]?.id || '');
+
+  useEffect(() => {
+    if (!available.find((l) => l.id === pending)) {
+      setPending(available[0]?.id || '');
+    }
+  }, [available, pending]);
+
+  if (available.length === 0) {
+    return <span className="small-note">All labels are applied.</span>;
+  }
+  return (
+      <div className="flex items-center gap-2">
+        <select className="select select-bordered select-sm" value={pending} onChange={(e) => setPending(e.target.value)}>
+          {available.map((label) => (
+              <option key={label.id} value={label.id}>
+                {label.name}
+              </option>
+          ))}
+        </select>
+        <button
+            className="btn btn-sm btn-primary"
+            type="button"
+            onClick={() => pending && onAdd(pending)}
+        >
+          Add label
+        </button>
+      </div>
+  );
+}
+
+function DatasetSection({
+  title,
+  description,
+  columns,
+  rows,
+  labelOptions,
+  assignedLabels,
+  onAddLabel,
+  onRemoveLabel,
+}) {
+
   return (
       <div className="section-card">
         <details open className="space-y-3">
           <summary className="flex items-center gap-2">
             <span className="text-primary">◆</span>
-            <span className="flex items-center gap-2">
-            {title}
-              {badges.length > 0 && (
-                  <span className="inline-tags">
-                {badges.map((badge) => (
-                    <span key={badge} className="badge badge-outline">
-                    {badge}
-                  </span>
-                ))}
-              </span>
-              )}
-          </span>
+            <span className="flex items-center gap-2">{title}</span>
           </summary>
-          <p className="small-note">{description}</p>
-          {children}
+          <div className="space-y-2">
+            <p className="small-note">{description}</p>
+            <div className="label-area">
+              <div className="flex items-center gap-2 flex-wrap">
+                {assignedLabels.length > 0 ? (
+                    assignedLabels.map((label) => (
+                        <LabelBadge key={label.id} label={label} onRemove={onRemoveLabel} />
+                    ))
+                ) : (
+                    <span className="small-note">No labels yet.</span>
+                )}
+              </div>
+              {labelOptions.length > 0 && (
+                  <LabelPicker allLabels={labelOptions} selectedIds={assignedLabels.map((l) => l.id)} onAdd={onAddLabel} />
+              )}
+            </div>
+          </div>
           <DataTable columns={columns} rows={rows} />
         </details>
-      </div>
-  );
-}
-
-function MetadataPanel({ metadata }) {
-  return (
-      <div className="section-card">
-        <h2 className="text-xl font-semibold">Data access and categorisation</h2>
-        <div className="grid-panels">
-          {metadata.map((item) => (
-              <div key={item.entity} className="meta-card">
-                <div className="card-body">
-                  <h3 className="card-title text-base">{item.entity}</h3>
-                  <div className="inline-tags">
-                    {item.access.map((tag) => (
-                        <span key={tag} className="tag">
-                    {tag}
-                  </span>
-                    ))}
-                  </div>
-                  <p className="text-sm">
-                    <span className="font-semibold">Category:</span> {item.category}
-                  </p>
-                  <p className="text-sm">
-                    <span className="font-semibold">Purpose:</span> {item.purpose}
-                  </p>
-                </div>
-              </div>
-          ))}
-        </div>
-      </div>
-  );
-}
-
-function EntityMatrix({ matrix }) {
-  const headers = [
-    { key: 'pid', label: 'PID' },
-    { key: 'pseudo', label: 'Pseudonymous' },
-    { key: 'anonRe', label: 'Anonymous (re-identifiable)' },
-    { key: 'anon', label: 'Anonymous (fully)' },
-  ];
-
-  return (
-      <div className="section-card">
-        <h2 className="text-xl font-semibold">Data kinds by entity & categorisation</h2>
-        <DataTable
-            columns={[
-              { key: 'entity', label: 'Entity' },
-              ...headers.map((h) => ({
-                key: h.key,
-                label: h.label,
-                render: (value) => (
-                    <div className="inline-tags">
-                      {value.map((item) => (
-                          <span key={item} className="tag">
-                    {item}
-                  </span>
-                      ))}
-                    </div>
-                ),
-              })),
-            ]}
-            rows={matrix}
-        />
       </div>
   );
 }
@@ -217,6 +303,166 @@ function TtpPanel({ ttps, schools }) {
                 </div>
               </div>
           ))}
+        </div>
+      </div>
+  );
+}
+function LabelSetManager({
+  labelSets,
+  activeSetName,
+  onSelectSet,
+  onCreateSet,
+  onRenameSet,
+  onDeleteSet,
+  onBackupSet,
+  onAddLabel,
+  onRemoveLabelDefinition,
+  onShare,
+}) {
+  const activeSet = labelSets.find((set) => set.name === activeSetName) || labelSets[0];
+  const [newSetName, setNewSetName] = useState('');
+  const [labelName, setLabelName] = useState('');
+  const [labelColor, setLabelColor] = useState('#0ea5e9');
+  const [labelDescription, setLabelDescription] = useState('');
+  const [shareLink, setShareLink] = useState('');
+
+  if (!activeSet) return null;
+
+  return (
+      <div className="section-card">
+        <h2 className="text-xl font-semibold">Labels, sets, and sharing</h2>
+        <div className="grid grid-cols-1 lg:grid-cols-3 gap-4">
+          <div className="space-y-2">
+            <label className="daisy-select space-y-1">
+              <span>Current set</span>
+              <select value={activeSetName} onChange={(e) => onSelectSet(e.target.value)}>
+                {labelSets.map((set) => (
+                    <option key={set.name} value={set.name}>
+                      {set.name}
+                    </option>
+                ))}
+              </select>
+            </label>
+            <label className="space-y-1 block">
+              <span className="text-sm font-medium text-base-content/70">Rename set</span>
+              <input
+                  type="text"
+                  className="input input-bordered input-sm w-full"
+                  value={activeSetName}
+                  onChange={(e) => onRenameSet(e.target.value)}
+              />
+            </label>
+            <div className="flex gap-2 items-end">
+              <label className="space-y-1 flex-1">
+                <span className="text-sm font-medium text-base-content/70">New set name</span>
+                <input
+                    type="text"
+                    className="input input-bordered input-sm w-full"
+                    placeholder="Custom label set"
+                    value={newSetName}
+                    onChange={(e) => setNewSetName(e.target.value)}
+                />
+              </label>
+              <button className="btn btn-sm btn-secondary" type="button" onClick={() => {
+                if (!newSetName.trim()) return;
+                onCreateSet(newSetName.trim());
+                setNewSetName('');
+              }}>
+                Create set
+              </button>
+              </div>
+            <div className="flex gap-2">
+              <button
+                  className="btn btn-sm btn-outline"
+                  type="button"
+                  onClick={() => onBackupSet()}
+              >
+                Save backup copy
+              </button>
+              <button
+                  className="btn btn-sm btn-error"
+                  type="button"
+                  onClick={() => onDeleteSet()}
+              >
+                Delete set
+              </button>
+            </div>
+            <div className="space-y-2">
+              <button className="btn btn-sm" type="button" onClick={() => {
+                const link = onShare();
+                setShareLink(link);
+              }}>
+                Copy shareable link
+              </button>
+              {shareLink && (
+                  <div>
+                    <p className="small-note break-words">Copied link: {shareLink}</p>
+                    <button className="btn btn-neutral btn-outline m-1" onClick={() => setShareLink('')}>Hide</button>
+                  </div>
+              )}
+            </div>
+          </div>
+
+          <div className="lg:col-span-2 space-y-3">
+            <div className="space-y-2">
+              <h3 className="font-semibold text-base">Defined labels</h3>
+              <div className="inline-tags">
+                {activeSet.labels.length > 0 ? (
+                    activeSet.labels.map((label) => (
+                        <LabelBadge key={label.id} label={label} onRemove={onRemoveLabelDefinition} />
+                    ))
+                ) : (
+                    <span className="small-note">No labels defined yet.</span>
+                )}
+              </div>
+            </div>
+            <div className="grid grid-cols-1 md:grid-cols-3 gap-3 items-end">
+              <label className="space-y-1">
+                <span className="text-sm font-medium text-base-content/70">Label name</span>
+                <input
+                    type="text"
+                    className="input input-bordered input-sm w-full"
+                    value={labelName}
+                    onChange={(e) => setLabelName(e.target.value)}
+                    placeholder="e.g. Health"
+                />
+              </label>
+              <label className="space-y-1">
+                <span className="text-sm font-medium text-base-content/70">Colour</span>
+                <input
+                    type="color"
+                    className="input input-bordered input-sm w-full"
+                    value={labelColor}
+                    onChange={(e) => setLabelColor(e.target.value)}
+                />
+              </label>
+              <label className="space-y-1 md:col-span-3">
+                <span className="text-sm font-medium text-base-content/70">Short description (max {DESCRIPTION_LIMIT} chars)</span>
+                <input
+                    type="text"
+                    className="input input-bordered input-sm w-full"
+                    value={labelDescription}
+                    maxLength={DESCRIPTION_LIMIT}
+                    onChange={(e) => setLabelDescription(e.target.value)}
+                    placeholder="How should this label be used?"
+                />
+              </label>
+              <div className="md:col-span-3 flex justify-end">
+                <button className="btn btn-primary btn-sm" type="button" onClick={() => {
+                  if (!labelName.trim()) return;
+                  onAddLabel({
+                    name: labelName.trim(),
+                    color: labelColor,
+                    description: labelDescription.trim().slice(0, DESCRIPTION_LIMIT),
+                  });
+                  setLabelName('');
+                  setLabelDescription('');
+                }}>
+                  Add label
+                </button>
+              </div>
+            </div>
+          </div>
         </div>
       </div>
   );
@@ -567,6 +813,94 @@ function App() {
   const dataset = useMemo(() => buildDataset(20241201), []);
   console.log(dataset);
   const [filters, setFilters] = useState({ school: 'all', yearGroup: 'all', wave: 'all', ethnicity: 'all' });
+const initialSets = useMemo(() => loadLabelSets() || [DEFAULT_LABEL_SET], []);
+  const [labelSets, setLabelSets] = useState(initialSets);
+  const [activeSetName, setActiveSetName] = useState(initialSets[0]?.name || DEFAULT_LABEL_SET.name);
+
+  const activeSet = useMemo(
+      () => labelSets.find((set) => set.name === activeSetName) || labelSets[0] || DEFAULT_LABEL_SET,
+      [labelSets, activeSetName],
+  );
+
+  useEffect(() => {
+    saveLabelSets(labelSets);
+  }, [labelSets]);
+
+  const uniqueName = (base, sets) => {
+    let candidate = base;
+    let suffix = 0;
+    while (sets.some((set) => set.name === candidate)) {
+      suffix += 1;
+      candidate = `${base}-${suffix}`;
+    }
+    return candidate;
+  };
+
+  const normalizeAssignments = (assignments = {}) => Object.fromEntries(
+      Object.entries(assignments)
+          .sort(([a], [b]) => a.localeCompare(b))
+          .map(([section, ids]) => [section, [...ids].sort()]),
+  );
+
+  const areSetsEqual = (a, b) => {
+    const left = {
+      labels: (a.labels || []).map((label) => ({
+        id: label.id,
+        name: label.name,
+        color: label.color,
+        description: label.description,
+      })),
+      assignments: normalizeAssignments(a.assignments || {}),
+    };
+    const right = {
+      labels: (b.labels || []).map((label) => ({
+        id: label.id,
+        name: label.name,
+        color: label.color,
+        description: label.description,
+      })),
+      assignments: normalizeAssignments(b.assignments || {}),
+    };
+    return JSON.stringify(left) === JSON.stringify(right);
+  };
+
+  useEffect(() => {
+    if (typeof window === 'undefined') return;
+    const params = new URLSearchParams(window.location.search);
+    const incomingName = params.get('labelSetName');
+    const incomingLabels = params.get('labelSetLabels');
+    const incomingAssignments = params.get('labelSetAssignments');
+
+    if (incomingName && incomingLabels) {
+      try {
+        const parsedLabels = decodeDataFromParam(incomingLabels);
+        const parsedAssignments = incomingAssignments ? decodeDataFromParam(incomingAssignments) : {};
+        const incomingSet = { name: incomingName, labels: parsedLabels, assignments: parsedAssignments };
+        setLabelSets((prev) => {
+          const next = [...prev];
+          const idx = next.findIndex((set) => set.name === incomingName);
+          if (idx !== -1) {
+            const existing = next[idx];
+            const differs = !areSetsEqual(existing, incomingSet);
+            if (differs && existing.name !== DEFAULT_LABEL_SET.name) {
+              const backupName = uniqueName(`${existing.name}_backup`, next);
+              next[idx] = { ...existing, name: backupName };
+            } else if (differs) {
+              incomingSet.name = uniqueName(`${incomingName} (imported)`, next);
+            } else {
+              next.splice(idx, 1);
+            }
+          }
+          const trimmed = next.filter((set) => set.name !== incomingSet.name);
+          trimmed.push(incomingSet);
+          return trimmed;
+        });
+        setActiveSetName(incomingSet.name);
+      } catch (err) {
+        console.warn('Unable to load label set from URL', err);
+      }
+    }
+  }, []);
 
   const filterRows = (rows, map) =>
       rows
@@ -689,15 +1023,96 @@ function App() {
     return { ...row, ...extras };
   };
 
-  const categoryBadges = {
-    credentials: ['PID'],
-    studentCredentials: ['PID'],
-    rewriteMap: ['Pseudonymous'],
-    surveyResponses: ['Pseudonymous'],
-    relabelledSurveyResponses: ['Anonymous (re-identifiable)'],
-    staticAggregated: ['Anonymous (fully)'],
-    dynamicAggregated: ['Anonymous (re-identifiable)'],
+  const ensureAssignments = (sectionKey) => activeSet.assignments?.[sectionKey] || [];
+  const resolvedLabels = (sectionKey) => ensureAssignments(sectionKey)
+      .map((id) => activeSet.labels.find((label) => label.id === id))
+      .filter(Boolean);
+
+  const updateActiveSet = (updater) => {
+    setLabelSets((prev) => prev.map((set) => {
+      if (set.name !== activeSet.name) return set;
+      return updater(set);
+    }));
   };
+
+  const addLabelDefinition = ({ name, color, description }) => {
+    updateActiveSet((set) => {
+      const newLabel = {
+        id: `${name.toLowerCase().replace(/\s+/g, '-')}-${Date.now().toString(36)}`,
+        name,
+        color,
+        description: description.slice(0, DESCRIPTION_LIMIT),
+      };
+      return { ...set, labels: [...set.labels, newLabel] };
+    });
+  };
+
+  const removeLabelDefinition = (labelId) => {
+    updateActiveSet((set) => {
+      const filteredLabels = set.labels.filter((label) => label.id !== labelId);
+      const trimmedAssignments = Object.fromEntries(
+          Object.entries(set.assignments || {}).map(([section, ids]) => [section, ids.filter((id) => id !== labelId)]),
+      );
+      return { ...set, labels: filteredLabels, assignments: trimmedAssignments };
+    });
+  };
+
+  const addLabelToSection = (sectionKey, labelId) => {
+    updateActiveSet((set) => {
+      const nextIds = Array.from(new Set([...(set.assignments?.[sectionKey] || []), labelId]));
+      return { ...set, assignments: { ...set.assignments, [sectionKey]: nextIds } };
+    });
+  };
+
+  const removeLabelFromSection = (sectionKey, labelId) => {
+    updateActiveSet((set) => {
+      const nextIds = (set.assignments?.[sectionKey] || []).filter((id) => id !== labelId);
+      return { ...set, assignments: { ...set.assignments, [sectionKey]: nextIds } };
+    });
+  };
+
+  const createSet = (name) => {
+    const existing = labelSets.find((set) => set.name === name);
+    if (existing) {
+      setActiveSetName(existing.name);
+      return;
+    }
+    const newSet = { name, labels: DEFAULT_LABELS, assignments: {} };
+    setLabelSets((prev) => [...prev, newSet]);
+    setActiveSetName(name);
+  };
+
+  const renameSet = (name) => {
+    if (!name.trim()) return;
+    setLabelSets((prev) => prev.map((set) => (set.name === activeSet.name ? { ...set, name } : set)));
+    setActiveSetName(name);
+  };
+
+  const backupSet = () => {
+    const candidate = uniqueName(`${activeSet.name}_backup`, labelSets);
+    const clone = { ...activeSet, name: candidate };
+    setLabelSets((prev) => [...prev, clone]);
+  };
+
+  const deleteSet = () => {
+    if (labelSets.length <= 1) return;
+    const remaining = labelSets.filter((set) => set.name !== activeSet.name);
+    setLabelSets(remaining);
+    setActiveSetName(remaining[0]?.name || DEFAULT_LABEL_SET.name);
+  };
+
+  const buildShareLink = () => {
+    if (typeof window === 'undefined') return '';
+    const url = new URL(window.location.href);
+    url.searchParams.set('labelSetName', activeSet.name);
+    url.searchParams.set('labelSetLabels', encodeDataForParam(activeSet.labels));
+    url.searchParams.set('labelSetAssignments', encodeDataForParam(activeSet.assignments || {}));
+    const share = url.toString();
+    navigator.clipboard?.writeText(share).catch(() => {});
+    return share;
+  };
+
+  const labelOptions = activeSet.labels || [];
 
   return (
       <div className="min-h-screen">
@@ -707,8 +1122,7 @@ function App() {
               <div className="space-y-2">
                 <h1>IB Oxford data handling mockup</h1>
                 <p className="hero-copy">
-                  Seeded, reproducible mock data to help stakeholders explore what is collected, how it is categorised, and how it
-                  flows between entities.
+                  Seeded, reproducible mock data to help stakeholders explore what is collected, how it is categorised, and how it flows between entities.
                 </p>
               </div>
               <div className="badge-seed">Demo dataset (seed {dataset.seed})</div>
@@ -731,8 +1145,18 @@ function App() {
             <p className="small-note">Filters apply to the tables below to make walkthroughs easier.</p>
           </div>
 
-          <MetadataPanel metadata={dataset.metadata} />
-          <EntityMatrix matrix={dataset.entityMatrix} />
+          <LabelSetManager
+              labelSets={labelSets}
+              activeSetName={activeSet.name}
+              onSelectSet={setActiveSetName}
+              onCreateSet={createSet}
+              onRenameSet={renameSet}
+              onDeleteSet={deleteSet}
+              onBackupSet={backupSet}
+              onAddLabel={addLabelDefinition}
+              onRemoveLabelDefinition={removeLabelDefinition}
+              onShare={buildShareLink}
+          />
           <TtpPanel ttps={dataset.ttps} schools={dataset.schools} />
 
           <DatasetSection
@@ -740,7 +1164,10 @@ function App() {
               description="Credentials that are not assigned to an individual student, scoped by school and area."
               columns={credentialColumns}
               rows={filterRows(dataset.credentials)}
-              badges={categoryBadges.credentials}
+              labelOptions={labelOptions}
+              assignedLabels={resolvedLabels('credentials')}
+              onAddLabel={(labelId) => addLabelToSection('credentials', labelId)}
+              onRemoveLabel={(labelId) => removeLabelFromSection('credentials', labelId)}
           />
 
           <DatasetSection
@@ -748,7 +1175,10 @@ function App() {
               description="Student-facing credentials including yeargroup alignment."
               columns={studentCredentialColumns}
               rows={filterRows(dataset.studentCredentials)}
-              badges={categoryBadges.studentCredentials}
+              labelOptions={labelOptions}
+              assignedLabels={resolvedLabels('studentCredentials')}
+              onAddLabel={(labelId) => addLabelToSection('studentCredentials', labelId)}
+              onRemoveLabel={(labelId) => removeLabelFromSection('studentCredentials', labelId)}
           />
 
           <DatasetSection
@@ -756,7 +1186,10 @@ function App() {
               description="Maps student IDs to UIDs for pseudonymisation."
               columns={rewriteColumns}
               rows={filterRows(dataset.rewriteMap)}
-              badges={categoryBadges.rewriteMap}
+              labelOptions={labelOptions}
+              assignedLabels={resolvedLabels('rewriteMap')}
+              onAddLabel={(labelId) => addLabelToSection('rewriteMap', labelId)}
+              onRemoveLabel={(labelId) => removeLabelFromSection('rewriteMap', labelId)}
           />
 
           <DatasetSection
@@ -764,7 +1197,10 @@ function App() {
               description="Survey data labelled with student ID and wave."
               columns={surveyColumns}
               rows={filterRows(dataset.surveyResponses, mapSurveyRow)}
-              badges={categoryBadges.surveyResponses}
+              labelOptions={labelOptions}
+              assignedLabels={resolvedLabels('surveyResponses')}
+              onAddLabel={(labelId) => addLabelToSection('surveyResponses', labelId)}
+              onRemoveLabel={(labelId) => removeLabelFromSection('surveyResponses', labelId)}
           />
 
           <DatasetSection
@@ -772,7 +1208,10 @@ function App() {
               description="Survey data with student IDs rewritten to UIDs."
               columns={relabelledSurveyColumns}
               rows={filterRows(dataset.relabelledSurveyResponses, mapSurveyRow)}
-              badges={categoryBadges.relabelledSurveyResponses}
+              labelOptions={labelOptions}
+              assignedLabels={resolvedLabels('relabelledSurveyResponses')}
+              onAddLabel={(labelId) => addLabelToSection('relabelledSurveyResponses', labelId)}
+              onRemoveLabel={(labelId) => removeLabelFromSection('relabelledSurveyResponses', labelId)}
           />
 
           <DatasetSection
@@ -780,7 +1219,10 @@ function App() {
               description="Yeargroup-level aggregates by wave with confidence intervals, split by ethnicity and all-ethnicities totals."
               columns={aggregateColumns}
               rows={filterRows([...dataset.staticAggregated, ...dataset.staticAggregatedAgnostic])}
-              badges={categoryBadges.staticAggregated}
+              labelOptions={labelOptions}
+              assignedLabels={resolvedLabels('staticAggregated')}
+              onAddLabel={(labelId) => addLabelToSection('staticAggregated', labelId)}
+              onRemoveLabel={(labelId) => removeLabelFromSection('staticAggregated', labelId)}
           />
 
           <DatasetSection
@@ -788,7 +1230,10 @@ function App() {
               description="Aggregates intended for responsive queries with suppression logic, including ethnicity-aware and ethnicity-agnostic cuts."
               columns={aggregateColumns}
               rows={filterRows([...dataset.dynamicAggregated, ...dataset.dynamicAggregatedAgnostic])}
-              badges={categoryBadges.dynamicAggregated}
+              labelOptions={labelOptions}
+              assignedLabels={resolvedLabels('dynamicAggregated')}
+              onAddLabel={(labelId) => addLabelToSection('dynamicAggregated', labelId)}
+              onRemoveLabel={(labelId) => removeLabelFromSection('dynamicAggregated', labelId)}
           />
 
           <SurveyChart
