@@ -555,14 +555,11 @@ function DynamicAggregatedSection({
       [relabelledSurveyResponses],
   );
 
-  const groupingOptions = [
-    { value: 'school-year-ethnicity', label: 'School + Yeargroup + Ethnicity', fields: ['schoolId', 'yearGroup', 'ethnicity'] },
-    { value: 'school-year', label: 'School + Yeargroup', fields: ['schoolId', 'yearGroup'] },
-    { value: 'school', label: 'School', fields: ['schoolId'] },
-    { value: 'year', label: 'Yeargroup', fields: ['yearGroup'] },
-    { value: 'ethnicity', label: 'Ethnicity', fields: ['ethnicity'] },
-    { value: 'ttp', label: 'Trusted third party', fields: ['ttpId'] },
-    { value: 'all', label: 'All data together', fields: [] },
+  const groupingChoices = [
+    { value: 'schoolId', label: 'School' },
+    { value: 'yearGroup', label: 'Yeargroup' },
+    { value: 'ethnicity', label: 'Ethnicity' },
+    { value: 'ttpId', label: 'Trusted third party' },
   ];
 
   const [filters, setFilters] = useState({
@@ -575,7 +572,7 @@ function DynamicAggregatedSection({
     surveyValue: '0',
   });
   const [displaySurveyId, setDisplaySurveyId] = useState(surveys[0].id);
-  const [grouping, setGrouping] = useState(groupingOptions[0].value);
+  const [groupingSelections, setGroupingSelections] = useState(['schoolId', 'yearGroup', 'ethnicity']);
   const [suppressionThreshold, setSuppressionThreshold] = useState(5);
   const chartRef = useRef(null);
 
@@ -592,12 +589,8 @@ function DynamicAggregatedSection({
   }, [displaySurveyId, surveys]);
 
   const groupingFields = useMemo(
-      () => {
-        const found = groupingOptions.find((opt) => opt.value === grouping);
-        const base = found ? found.fields : groupingOptions[0].fields;
-        return Array.from(new Set(['wave', ...base]));
-      },
-      [grouping],
+      () => ['wave', ...groupingChoices.filter((opt) => groupingSelections.includes(opt.value)).map((opt) => opt.value)],
+      [groupingSelections],
   );
 
   const groupingWithoutWave = useMemo(
@@ -897,16 +890,29 @@ function DynamicAggregatedSection({
                   </label>
                 </div>
                 <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
-                  <label className="daisy-select space-y-1">
-                    <span>Grouping level</span>
-                    <select value={grouping} onChange={(e) => setGrouping(e.target.value)}>
-                      {groupingOptions.map((opt) => (
-                          <option key={opt.value} value={opt.value}>
-                            {opt.label}
-                          </option>
-                      ))}
-                    </select>
-                  </label>
+
+                  <div className="space-y-2">
+                    <span className="text-sm font-medium text-base-content/70">Grouping levels</span>
+                    <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+                      {groupingChoices.map((choice) => {
+                        const checked = groupingSelections.includes(choice.value);
+                        return (
+                            <label key={choice.value} className="flex items-center gap-2 text-sm">
+                              <input
+                                  type="checkbox"
+                                  className="checkbox checkbox-sm"
+                                  checked={checked}
+                                  onChange={() => setGroupingSelections((prev) => (checked
+                                      ? prev.filter((val) => val !== choice.value)
+                                      : [...prev, choice.value]))}
+                              />
+                              <span>{choice.label}</span>
+                            </label>
+                        );
+                      })}
+                    </div>
+                    <p className="small-note">Choose one or more fields to group by; leave all unchecked to aggregate everything.</p>
+                  </div>
                   <label className="space-y-1">
                     <span className="text-sm font-medium text-base-content/70">Suppression threshold</span>
                     <input
