@@ -47,6 +47,9 @@ jobs:
     environment:
       name: github-pages
       # url will be provided automatically by the action and exposed at steps.deployment.outputs.page_url
+    permissions:
+      pages: write
+      id-token: write
     steps:
       - name: Deploy to GitHub Pages
         id: deployment
