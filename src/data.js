@@ -114,6 +114,32 @@ const surveys = [
   { id: 'gad7', name: 'GAD-7', items: 7 }
 ];
 
+const ethnicityByTtp = {
+  'oxford-ttp': 'british',
+  'shanghai-ttp': 'chinese',
+};
+
+const oppositeEthnicity = {
+  british: 'chinese',
+  chinese: 'british',
+};
+
+const unicornNames = [
+  'Starlight Glimmer',
+  'Twilight Sparkle',
+  'Moonbeam Whisper',
+  'Silver Lining',
+  'Rainbow Prancer',
+  'Sunset Shimmer',
+  'Velvet Sky',
+  'Petal Dancer',
+  'Crystal Charm',
+  'Aurora Gleam',
+  'Gossamer Glow',
+  'Bramble Shine',
+];
+
+
 function createSeededRandom(seed = 1) {
   let state = seed >>> 0;
   return () => {
@@ -131,26 +157,62 @@ function buildStudents(random) {
   const students = [];
   const usedNames = new Set();
   const schoolToTtp = Object.fromEntries(schools.map((school) => [school.id, school.ttpId]));
+  const unicornQueue = [...unicornNames];
+
+  const pickUnicornName = () => {
+    if (unicornQueue.length === 0) {
+      return `Unicorn Spark ${shortHash(3)}`;
+    }
+    return unicornQueue.shift();
+  };
+
+  const ethnicityNamePool = {
+    british: ttpNamePools['oxford-ttp'],
+    chinese: ttpNamePools['shanghai-ttp'],
+  };
 
   for (const school of schools) {
     for (const yearGroup of yearGroups) {
       const cohortSize = 8 + Math.floor(random() * 6);
-      for (let i = 0; i < cohortSize; i++) {
-        const ttpId = schoolToTtp[school.id];
-        const namePool = ttpNamePools[ttpId] || ttpNamePools['oxford-ttp'];
-        let name = '';
+      const ttpId = schoolToTtp[school.id];
+      const primaryEthnicity = ethnicityByTtp[ttpId] || 'british';
+      const secondaryEthnicity = oppositeEthnicity[primaryEthnicity] || primaryEthnicity;
+      const unicornStudent = {
+        ethnicity: 'unicorn',
+        name: pickUnicornName(),
+      };
+
+      const remaining = cohortSize - 1;
+      const minOpposite = Math.max(1, Math.ceil(cohortSize * 0.1));
+      const oppositeCount = Math.min(remaining, minOpposite);
+      const primaryCount = Math.max(0, remaining - oppositeCount);
+
+      const plan = [
+        unicornStudent,
+        ...Array.from({length: primaryCount}, () => ({ethnicity: primaryEthnicity})),
+        ...Array.from({length: oppositeCount}, () => ({ethnicity: secondaryEthnicity})),
+      ];
+
+      for (const entry of plan) {
+        const namePool = entry.ethnicity === 'unicorn'
+            ? null
+            : ethnicityNamePool[entry.ethnicity] || ttpNamePools['oxford-ttp'];
+        let name = entry.name || '';
         let attempts = 0;
-        do {
-          name = `${sample(namePool.first, random)} ${sample(namePool.last, random)}`;
-          attempts += 1;
-        } while (usedNames.has(name) && attempts < 50);
+        if (entry.ethnicity !== 'unicorn') {
+          do {
+            name = `${sample(namePool.first, random)} ${sample(namePool.last, random)}`;
+            attempts += 1;
+          } while (usedNames.has(name) && attempts < 50);
+        }
 
         usedNames.add(name);
         students.push({
           id: `${school.id.toUpperCase()}-${counter++}`,
           schoolId: school.id,
           yearGroup,
-          name
+          name,
+          ethnicity: entry.ethnicity,
         });
       }
     }
@@ -193,7 +255,8 @@ function buildCredentials(students, random) {
       ...creds,
       studentId: student.id,
       name: student.name,
-      yearGroup: student.yearGroup
+      yearGroup: student.yearGroup,
+      ethnicity: student.ethnicity
     });
   });
 
@@ -204,6 +267,7 @@ function buildRewriteMap(students, random) {
   return students.map((student, idx) => ({
     schoolId: student.schoolId,
     studentId: student.id,
+    ethnicity: student.ethnicity,
     uid: `UID-${(idx + 1).toString().padStart(5, '0')}`
   }));
 }
@@ -217,6 +281,7 @@ function buildSurveyResponses(students, random) {
         studentId: student.id,
         schoolId: student.schoolId,
         yearGroup: student.yearGroup,
+        ethnicity: student.ethnicity,
         wave
       };
       if (random() < 0.05) continue; // some missing data
@@ -261,10 +326,11 @@ function ci95(values) {
   return 1.96 * (stddev(values) / Math.sqrt(values.length));
 }
 
-function aggregateStatic(responses) {
+function aggregateStatic(responses, { includeEthnicity = true } = {}) {
   const grouped = new Map();
   for (const resp of responses) {
-    const key = [resp.schoolId, resp.yearGroup, resp.wave].join('|');
+    const ethnicity = includeEthnicity ? resp.ethnicity : 'All ethnicities';
+    const key = [resp.schoolId, resp.yearGroup, ethnicity, resp.wave].join('|');
     if (!grouped.has(key)) {
       grouped.set(key, []);
     }
@@ -273,7 +339,7 @@ function aggregateStatic(responses) {
 
   const aggregates = [];
   for (const [key, group] of grouped.entries()) {
-    const [schoolId, yearGroup, wave] = key.split('|');
+    const [schoolId, yearGroup, ethnicity, wave] = key.split('|');
     const stats = {};
     for (const survey of surveys) {
       const totals = group.map(response => response[`${survey.id}-total`] ?? 0);
@@ -285,15 +351,16 @@ function aggregateStatic(responses) {
     aggregates.push({
       schoolId,
       yearGroup,
+      ethnicity,
       wave,
+      n: stats['phq9-n'] ?? 0,
       ...stats
     });
   }
   return aggregates;
 }
 
-function aggregateDynamic(responses) {
-  const aggregates = aggregateStatic(responses);
+function applySuppression(aggregates) {
   return aggregates.map((agg) => ({
     ...agg,
     suppressed: agg.n < 5,
@@ -348,8 +415,12 @@ export function buildDataset(seed = 42) {
   const rewriteMap = buildRewriteMap(students, random);
   const surveysRaw = buildSurveyResponses(students, random);
   const relabelled = relabelResponses(surveysRaw, rewriteMap);
-  const staticAggregated = aggregateStatic(relabelled);
-  const dynamicAggregated = aggregateDynamic(relabelled);
+  const aggregatedByEthnicity = aggregateStatic(relabelled, { includeEthnicity: true });
+  const aggregatedAllEthnicities = aggregateStatic(relabelled, { includeEthnicity: false });
+  const staticAggregated = applySuppression(aggregatedByEthnicity);
+  const staticAggregatedAgnostic = applySuppression(aggregatedAllEthnicities);
+  const dynamicAggregated = applySuppression(aggregatedByEthnicity);
+  const dynamicAggregatedAgnostic = applySuppression(aggregatedAllEthnicities);
 
   return {
     seed,
@@ -364,7 +435,9 @@ export function buildDataset(seed = 42) {
     rewriteMap,
     relabelledSurveyResponses: relabelled,
     staticAggregated,
+    staticAggregatedAgnostic,
     dynamicAggregated,
+    dynamicAggregatedAgnostic,
     metadata: buildMetadataSummary(),
     entityMatrix: buildEntityMatrix(),
     ttps

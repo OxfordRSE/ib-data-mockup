@@ -3,10 +3,11 @@ import ReactDOM from 'react-dom/client';
 import Plotly from 'plotly.js-dist-min';
 import { buildDataset } from './data.js';
 import './index.css';
+import clsx from "clsx";
 
-function FilterRow({ schools, yearGroups, waves, filters, onChange, schoolToTtp }) {
+function FilterRow({ schools, yearGroups, waves, ethnicities, filters, onChange, schoolToTtp }) {
   return (
-      <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
+      <div className="grid grid-cols-1 sm:grid-cols-4 gap-4">
         <label className="daisy-select space-y-1">
           <span>School</span>
           <select
@@ -18,6 +19,20 @@ function FilterRow({ schools, yearGroups, waves, filters, onChange, schoolToTtp 
                 <option key={school.id} value={school.id}>
                   {school.name}
                   {schoolToTtp && schoolToTtp[school.id] ? ` (${schoolToTtp[school.id]})` : ''}
+                </option>
+            ))}
+          </select>
+        </label>
+        <label className="daisy-select space-y-1">
+          <span>Ethnicity</span>
+          <select
+              value={filters.ethnicity || 'all'}
+              onChange={(e) => onChange({ ...filters, ethnicity: e.target.value })}
+          >
+            <option value="all">All</option>
+            {ethnicities.map((ethnicity) => (
+                <option key={ethnicity} value={ethnicity}>
+                  {ethnicity}
                 </option>
             ))}
           </select>
@@ -66,7 +81,10 @@ function DataTable({ columns, rows }) {
           </thead>
           <tbody>
           {rows.map((row, idx) => (
-              <tr key={idx} className="hover:bg-base-200/70">
+              <tr key={idx} className={clsx({
+                "hover:bg-base-200/70": !(row['phq9-n'] > 0 && row['phq9-n'] < 5),
+                "bg-error/70": row['phq9-n'] > 0 && row['phq9-n'] < 5
+              })}>
                 {columns.map((col) => (
                     <td key={col.key} className="text-sm">
                       {col.render ? col.render(row[col.key], row) : row[col.key]}
@@ -213,6 +231,18 @@ function SurveyChart({ responses, surveys, waves, schools, yearGroups, schoolToT
   const [school, setSchool] = useState(schools[0].id);
   const [yearGroup, setYearGroup] = useState(yearGroups[0]);
   const chartRef = useRef(null);
+  const ethnicityOptions = useMemo(
+      () => ['all', ...Array.from(new Set(responses.map((r) => r.ethnicity))).sort()],
+      [responses],
+  );
+  const [ethnicity, setEthnicity] = useState(ethnicityOptions[0]);
+
+  useEffect(() => {
+    if (!ethnicityOptions.includes(ethnicity)) {
+      setEthnicity(ethnicityOptions[0]);
+    }
+  }, [ethnicityOptions, ethnicity]);
+
 
   const stats = useMemo(
       () => responses.map((resp) => {
@@ -236,9 +266,28 @@ function SurveyChart({ responses, surveys, waves, schools, yearGroups, schoolToT
 
     const traces = [];
 
+    const resolvePoint = (entries) => {
+      const toPoint = (entry) => ({
+        mean: entry?.mean ?? null,
+        ci: entry?.ci95 ?? null,
+        n: entry?.n ?? 0,
+      });
+      if (entries.length === 0) return { mean: null, ci: null, n: 0 };
+      if (ethnicity !== 'all') {
+        return toPoint(entries[0]);
+      }
+      const totalN = entries.reduce((sum, e) => sum + e.n, 0);
+      if (totalN === 0) return { mean: null, ci: null, n: 0 };
+      const weightedMean = entries.reduce((sum, e) => sum + e.mean * (e.n / totalN), 0);
+      const weightedCi = entries.reduce((sum, e) => sum + e.ci95 * (e.n / totalN), 0);
+      return { mean: Number(weightedMean.toFixed(2)), ci: Number(weightedCi.toFixed(2)), n: totalN };
+    };
+
     if (view === 'cross-school') {
       for (const s of schools) {
-        const byWave = orderedWaves.map((wave) => stats.find((d) => d.schoolId === s.id && d.wave === wave));
+        const byWave = orderedWaves.map((wave) => resolvePoint(
+            stats.filter((d) => d.schoolId === s.id && d.wave === wave && (ethnicity === 'all' || d.ethnicity === ethnicity)),
+        ));
         traces.push({
           x: orderedWaves,
           y: byWave.map((d) => d.mean),
@@ -249,13 +298,12 @@ function SurveyChart({ responses, surveys, waves, schools, yearGroups, schoolToT
       }
       // Weighted average total line
       const totalByWave = orderedWaves.map((wave) => {
-        const entries = stats.filter((d) => d.wave === wave && Number.isFinite(d.mean) && d.n > 0);
-        const totalN = entries.reduce((sum, e) => sum + e.n, 0);
-        if (totalN === 0) return { mean: null, ci: null };
-        const weightedMean = entries.reduce((sum, e) => sum + e.mean * (e.n / totalN), 0);
-        // Approximate CI95 for weighted mean
-        const weightedCi = entries.reduce((sum, e) => sum + e.ci95 * (e.n / totalN), 0);
-        return { mean: Number(weightedMean.toFixed(2)), ci: Number(weightedCi.toFixed(2)) };
+        const entries = stats.filter((d) =>
+            d.wave === wave
+            && Number.isFinite(d.mean)
+            && d.n > 0
+            && (ethnicity === 'all' || d.ethnicity === ethnicity));
+        return resolvePoint(entries);
       });
       traces.push({
         x: orderedWaves,
@@ -267,7 +315,12 @@ function SurveyChart({ responses, surveys, waves, schools, yearGroups, schoolToT
       });
     } else {
       for (const yg of yearGroups) {
-        const byWave = orderedWaves.map((wave) => stats.find((d) => d.schoolId === school && d.yearGroup === yg && d.wave === wave));
+        const byWave = orderedWaves.map((wave) => resolvePoint(stats.filter((d) =>
+            d.schoolId === school
+            && d.yearGroup === yg
+            && d.wave === wave
+            && (ethnicity === 'all' || d.ethnicity === ethnicity)
+        )));
         traces.push({
           x: orderedWaves,
           y: byWave.map((d) => d.mean),
@@ -278,13 +331,13 @@ function SurveyChart({ responses, surveys, waves, schools, yearGroups, schoolToT
       }
       // Weighted average total line
       const totalByWave = orderedWaves.map((wave) => {
-        const entries = stats.filter((d) => d.schoolId === school && d.wave === wave && Number.isFinite(d.mean) && d.n > 0);
-        const totalN = entries.reduce((sum, e) => sum + e.n, 0);
-        if (totalN === 0) return { mean: null, ci: null };
-        const weightedMean = entries.reduce((sum, e) => sum + e.mean * (e.n / totalN), 0);
-        // Approximate CI95 for weighted mean
-        const weightedCi = entries.reduce((sum, e) => sum + e.ci95 * (e.n / totalN), 0);
-        return { mean: Number(weightedMean.toFixed(2)), ci: Number(weightedCi.toFixed(2)) };
+        const entries = stats.filter((d) =>
+            d.schoolId === school
+            && d.wave === wave
+            && Number.isFinite(d.mean)
+            && d.n > 0
+            && (ethnicity === 'all' || d.ethnicity === ethnicity));
+        return resolvePoint(entries);
       });
       traces.push({
         x: orderedWaves,
@@ -308,7 +361,7 @@ function SurveyChart({ responses, surveys, waves, schools, yearGroups, schoolToT
         },
         { responsive: true },
     );
-  }, [stats, view, surveyId, school, yearGroup, surveys, waves, schools]);
+  }, [stats, view, surveyId, school, yearGroup, surveys, waves, schools, ethnicity]);
 
   const surveyOptions = useMemo(() => surveys.map((s) => ({ value: s.id, label: s.name })), [surveys]);
 
@@ -335,6 +388,16 @@ function SurveyChart({ responses, surveys, waves, schools, yearGroups, schoolToT
               {surveyOptions.map((opt) => (
                   <option key={opt.value} value={opt.value}>
                     {opt.label}
+                  </option>
+              ))}
+            </select>
+          </label>
+          <label className="daisy-select space-y-1">
+            <span>Ethnicity</span>
+            <select value={ethnicity} onChange={(e) => setEthnicity(e.target.value)}>
+              {ethnicityOptions.map((opt) => (
+                  <option key={opt} value={opt}>
+                    {opt === 'all' ? 'All ethnicities' : opt}
                   </option>
               ))}
             </select>
@@ -503,7 +566,7 @@ function ItemResponseChart({ responses, surveys, waves, schools, yearGroups, sch
 function App() {
   const dataset = useMemo(() => buildDataset(20241201), []);
   console.log(dataset);
-  const [filters, setFilters] = useState({ school: 'all', yearGroup: 'all', wave: 'all' });
+  const [filters, setFilters] = useState({ school: 'all', yearGroup: 'all', wave: 'all', ethnicity: 'all' });
 
   const filterRows = (rows, map) =>
       rows
@@ -511,9 +574,15 @@ function App() {
             const schoolMatch = filters.school === 'all' || row.schoolId === filters.school;
             const yearMatch = filters.yearGroup === 'all' || row.yearGroup === filters.yearGroup;
             const waveMatch = filters.wave === 'all' || row.wave === filters.wave;
-            return schoolMatch && yearMatch && waveMatch;
+            const ethnicityMatch = filters.ethnicity === 'all' || row.ethnicity === filters.ethnicity;
+            return schoolMatch && yearMatch && waveMatch && ethnicityMatch;
           })
           .map(map || ((r) => r));
+
+  const ethnicityOptions = useMemo(
+      () => Array.from(new Set(dataset.students.map((s) => s.ethnicity))).sort(),
+      [dataset.students],
+  );
 
   const schoolLookup = useMemo(
       () => Object.fromEntries(dataset.schools.map((s) => [s.id, s.name])),
@@ -541,6 +610,7 @@ function App() {
     { key: 'ttp', label: 'TTP', render: (_, row) => schoolToTtp[row.schoolId] || '—' },
     { key: 'schoolId', label: 'School', render: (value) => schoolLookup[value] || value },
     { key: 'yearGroup', label: 'Yeargroup' },
+    { key: 'ethnicity', label: 'Ethnicity' },
     { key: 'name', label: 'Student' },
     { key: 'id', label: 'Login ID' },
     { key: 'password', label: 'Password' },
@@ -570,6 +640,7 @@ function App() {
     { key: 'ttp', label: 'TTP', render: (_, row) => schoolToTtp[row.schoolId] || '—' },
     { key: 'schoolId', label: 'School', render: (v) => schoolLookup[v] || v },
     { key: 'yearGroup', label: 'Yeargroup' },
+    { key: 'ethnicity', label: 'Ethnicity' },
     { key: 'studentId', label: 'Student' },
     { key: 'wave', label: 'Wave' },
     ...surveyItemColumns,
@@ -579,6 +650,7 @@ function App() {
     { key: 'ttp', label: 'TTP', render: (_, row) => schoolToTtp[row.schoolId] || '—' },
     { key: 'schoolId', label: 'School', render: (v) => schoolLookup[v] || v },
     { key: 'yearGroup', label: 'Yeargroup' },
+    { key: 'ethnicity', label: 'Ethnicity' },
     { key: 'uid', label: 'Student' },
     { key: 'wave', label: 'Wave' },
     ...surveyItemColumns,
@@ -586,8 +658,9 @@ function App() {
 
   const rewriteColumns = [
     { key: 'ttp', label: 'TTP', render: (_, row) => schoolToTtp[row.schoolId] || '—' },
-    { key: 'schoolId', label: 'School', render: (v) => schoolLookup[v] || v },
     { key: 'studentId', label: 'Student ID' },
+    { key: 'ethnicity', label: 'Ethnicity' },
+    { key: 'schoolId', label: 'School', render: (v) => schoolLookup[v] || v },
     { key: 'uid', label: 'UID' },
   ];
 
@@ -595,6 +668,7 @@ function App() {
     { key: 'ttp', label: 'TTP', render: (_, row) => schoolToTtp[row.schoolId] || '—' },
     { key: 'schoolId', label: 'School', render: (v) => schoolLookup[v] || v },
     { key: 'yearGroup', label: 'Yeargroup' },
+    { key: 'ethnicity', label: 'Ethnicity' },
     { key: 'wave', label: 'Wave' },
     { key: 'phq9-n', label: 'PHQ9 N' },
     { key: 'phq9-mean', label: 'PHQ9 Mean Total' },
@@ -652,6 +726,7 @@ function App() {
                 filters={filters}
                 onChange={setFilters}
                 schoolToTtp={schoolToTtp}
+                ethnicities={ethnicityOptions}
             />
             <p className="small-note">Filters apply to the tables below to make walkthroughs easier.</p>
           </div>
@@ -702,17 +777,17 @@ function App() {
 
           <DatasetSection
               title="Static aggregated data"
-              description="Yeargroup-level aggregates by wave with confidence intervals."
+              description="Yeargroup-level aggregates by wave with confidence intervals, split by ethnicity and all-ethnicities totals."
               columns={aggregateColumns}
-              rows={filterRows(dataset.staticAggregated)}
+              rows={filterRows([...dataset.staticAggregated, ...dataset.staticAggregatedAgnostic])}
               badges={categoryBadges.staticAggregated}
           />
 
           <DatasetSection
               title="Dynamic aggregated data"
-              description="Aggregates intended for responsive queries with suppression logic."
+              description="Aggregates intended for responsive queries with suppression logic, including ethnicity-aware and ethnicity-agnostic cuts."
               columns={aggregateColumns}
-              rows={filterRows(dataset.dynamicAggregated)}
+              rows={filterRows([...dataset.dynamicAggregated, ...dataset.dynamicAggregatedAgnostic])}
               badges={categoryBadges.dynamicAggregated}
           />
 
